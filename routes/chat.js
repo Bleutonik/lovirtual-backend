@@ -1,218 +1,246 @@
 const express = require('express');
-const router = express.Router();
 const db = require('../database/db');
 const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
 
 // Aplicar autenticacion a todas las rutas
 router.use(authenticateToken);
 
-// GET / - Obtener mensajes (ultimos 50)
-router.get('/', (req, res) => {
+// GET /api/chat/conversations - Obtener conversaciones
+router.get('/conversations', (req, res) => {
   try {
-    const { limit, before_id } = req.query;
-    const messageLimit = Math.min(parseInt(limit) || 50, 100); // Max 100 mensajes
+    const userId = req.user.id || req.user.userId;
+    const isAdmin = req.user.role === 'admin' || req.user.role === 'supervisor';
 
-    let messages = db.getAll('chat_messages');
-
-    // Paginacion: obtener mensajes anteriores a un ID
-    if (before_id) {
-      messages = messages.filter(m => m.id < before_id);
-    }
-
-    // Ordenar por fecha de creacion descendente y tomar los ultimos
-    messages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    messages = messages.slice(0, messageLimit);
-
-    // Invertir para mostrar en orden cronologico
-    messages.reverse();
-
-    // Agregar info de usuarios
     const users = db.getAll('users');
-    messages = messages.map(m => {
-      const user = users.find(u => u.id === m.user_id);
-      return {
-        ...m,
-        user_id: m.user_id,
-        username: user ? user.username : 'Unknown',
-        first_name: user ? user.first_name : null,
-        last_name: user ? user.last_name : null,
-        avatar: user ? user.avatar : null
-      };
-    });
+    const messages = db.getAll('chat_messages') || [];
 
-    res.json({
-      success: true,
-      data: messages,
-      meta: {
-        count: messages.length,
-        has_more: messages.length === messageLimit
+    if (isAdmin) {
+      // Admin ve lista de empleados con sus ultimos mensajes
+      const employees = users.filter(u => u.role === 'employee');
+
+      const conversations = employees.map(emp => {
+        // Mensajes entre este empleado y cualquier admin
+        const empMessages = messages.filter(m =>
+          (m.from_user_id === emp.id) || (m.to_user_id === emp.id)
+        ).sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+        const lastMessage = empMessages[0];
+        const unreadCount = empMessages.filter(m =>
+          m.from_user_id === emp.id && m.to_user_id === userId && !m.read_at
+        ).length;
+
+        return {
+          userId: emp.id,
+          username: emp.username,
+          email: emp.email,
+          lastMessage: lastMessage ? {
+            content: lastMessage.content,
+            timestamp: lastMessage.created_at,
+            fromMe: lastMessage.from_user_id === userId
+          } : null,
+          unreadCount
+        };
+      });
+
+      // Ordenar: no leidos primero, luego por ultimo mensaje
+      conversations.sort((a, b) => {
+        if (a.unreadCount > 0 && b.unreadCount === 0) return -1;
+        if (a.unreadCount === 0 && b.unreadCount > 0) return 1;
+        if (!a.lastMessage) return 1;
+        if (!b.lastMessage) return -1;
+        return new Date(b.lastMessage.timestamp) - new Date(a.lastMessage.timestamp);
+      });
+
+      res.json({
+        success: true,
+        data: { conversations, isAdmin: true }
+      });
+    } else {
+      // Empleado ve su conversacion con admin
+      const admins = users.filter(u => u.role === 'admin');
+      const admin = admins[0];
+
+      if (!admin) {
+        return res.json({
+          success: true,
+          data: { conversation: null, isAdmin: false }
+        });
       }
-    });
+
+      const myMessages = messages.filter(m =>
+        (m.from_user_id === userId && m.to_user_id === admin.id) ||
+        (m.from_user_id === admin.id && m.to_user_id === userId)
+      );
+
+      const unreadCount = myMessages.filter(m =>
+        m.from_user_id === admin.id && m.to_user_id === userId && !m.read_at
+      ).length;
+
+      res.json({
+        success: true,
+        data: {
+          conversation: {
+            userId: admin.id,
+            username: admin.username,
+            role: 'admin',
+            unreadCount
+          },
+          isAdmin: false
+        }
+      });
+    }
   } catch (error) {
-    console.error('Error al obtener mensajes:', error);
+    console.error('Error obteniendo conversaciones:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener los mensajes'
+      message: 'Error interno del servidor'
     });
   }
 });
 
-// POST / - Enviar mensaje
-router.post('/', (req, res) => {
+// GET /api/chat/messages/:userId - Obtener mensajes con usuario especifico
+router.get('/messages/:userId', (req, res) => {
   try {
     const userId = req.user.id || req.user.userId;
-    const { message, message_type } = req.body;
+    const otherUserId = parseInt(req.params.userId);
+    const { limit = 50 } = req.query;
 
-    if (!message || message.trim() === '') {
-      return res.status(400).json({
+    const users = db.getAll('users');
+    const otherUser = users.find(u => u.id === otherUserId);
+
+    if (!otherUser) {
+      return res.status(404).json({
         success: false,
-        message: 'El mensaje no puede estar vacio'
+        message: 'Usuario no encontrado'
       });
     }
 
-    if (message.length > 2000) {
+    let messages = db.getAll('chat_messages') || [];
+
+    // Filtrar mensajes entre estos dos usuarios
+    messages = messages.filter(m =>
+      (m.from_user_id === userId && m.to_user_id === otherUserId) ||
+      (m.from_user_id === otherUserId && m.to_user_id === userId)
+    );
+
+    // Ordenar por fecha ascendente
+    messages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+    // Tomar los ultimos N mensajes
+    messages = messages.slice(-parseInt(limit));
+
+    // Agregar info
+    messages = messages.map(m => ({
+      ...m,
+      fromMe: m.from_user_id === userId,
+      senderName: m.from_user_id === userId ? 'Yo' : otherUser.username
+    }));
+
+    // Marcar como leidos los mensajes recibidos
+    messages.forEach(m => {
+      if (m.from_user_id === otherUserId && !m.read_at) {
+        db.update('chat_messages', m.id, { read_at: new Date().toISOString() });
+      }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        messages,
+        otherUser: {
+          id: otherUser.id,
+          username: otherUser.username,
+          role: otherUser.role
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error obteniendo mensajes:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// POST /api/chat/messages - Enviar mensaje
+router.post('/messages', (req, res) => {
+  try {
+    const userId = req.user.id || req.user.userId;
+    const { to_user_id, content } = req.body;
+
+    if (!to_user_id || !content || !content.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Destinatario y contenido son requeridos'
+      });
+    }
+
+    if (content.length > 2000) {
       return res.status(400).json({
         success: false,
         message: 'El mensaje no puede exceder 2000 caracteres'
       });
     }
 
-    const validTypes = ['text', 'image', 'file', 'system'];
-    const msgType = validTypes.includes(message_type) ? message_type : 'text';
-
-    const newMessage = db.insert('chat_messages', {
-      user_id: userId,
-      message: message.trim(),
-      message_type: msgType,
-      is_edited: false
-    });
-
-    // Agregar info del usuario
     const users = db.getAll('users');
-    const user = users.find(u => u.id === userId);
+    const toUser = users.find(u => u.id === parseInt(to_user_id));
+
+    if (!toUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario destinatario no encontrado'
+      });
+    }
+
+    const message = db.insert('chat_messages', {
+      from_user_id: userId,
+      to_user_id: parseInt(to_user_id),
+      content: content.trim(),
+      read_at: null
+    });
 
     res.status(201).json({
       success: true,
       message: 'Mensaje enviado',
       data: {
-        ...newMessage,
-        username: user ? user.username : 'Unknown',
-        first_name: user ? user.first_name : null,
-        last_name: user ? user.last_name : null,
-        avatar: user ? user.avatar : null
+        message: {
+          ...message,
+          fromMe: true,
+          senderName: 'Yo'
+        }
       }
     });
   } catch (error) {
-    console.error('Error al enviar mensaje:', error);
+    console.error('Error enviando mensaje:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al enviar el mensaje'
+      message: 'Error interno del servidor'
     });
   }
 });
 
-// PUT /:id - Editar mensaje propio
-router.put('/:id', (req, res) => {
+// GET /api/chat/unread - Conteo de no leidos
+router.get('/unread', (req, res) => {
   try {
-    const { id } = req.params;
     const userId = req.user.id || req.user.userId;
-    const { message } = req.body;
 
-    const existingMessage = db.getById('chat_messages', id);
-
-    if (!existingMessage) {
-      return res.status(404).json({
-        success: false,
-        message: 'Mensaje no encontrado'
-      });
-    }
-
-    // Solo el autor puede editar su mensaje
-    if (existingMessage.user_id !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'No puedes editar mensajes de otros usuarios'
-      });
-    }
-
-    if (!message || message.trim() === '') {
-      return res.status(400).json({
-        success: false,
-        message: 'El mensaje no puede estar vacio'
-      });
-    }
-
-    if (message.length > 2000) {
-      return res.status(400).json({
-        success: false,
-        message: 'El mensaje no puede exceder 2000 caracteres'
-      });
-    }
-
-    const updatedMessage = db.update('chat_messages', id, {
-      message: message.trim(),
-      is_edited: true
-    });
-
-    // Agregar info del usuario
-    const users = db.getAll('users');
-    const user = users.find(u => u.id === userId);
+    const messages = db.getAll('chat_messages') || [];
+    const unreadCount = messages.filter(m =>
+      m.to_user_id === userId && !m.read_at
+    ).length;
 
     res.json({
       success: true,
-      message: 'Mensaje actualizado',
-      data: {
-        ...updatedMessage,
-        username: user ? user.username : 'Unknown',
-        first_name: user ? user.first_name : null,
-        last_name: user ? user.last_name : null,
-        avatar: user ? user.avatar : null
-      }
+      data: { unreadCount }
     });
   } catch (error) {
-    console.error('Error al editar mensaje:', error);
+    console.error('Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al editar el mensaje'
-    });
-  }
-});
-
-// DELETE /:id - Eliminar mensaje propio
-router.delete('/:id', (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.user.id || req.user.userId;
-    const isAdmin = req.user.role === 'admin';
-
-    const existingMessage = db.getById('chat_messages', id);
-
-    if (!existingMessage) {
-      return res.status(404).json({
-        success: false,
-        message: 'Mensaje no encontrado'
-      });
-    }
-
-    // Solo el autor o admin puede eliminar
-    if (existingMessage.user_id !== userId && !isAdmin) {
-      return res.status(403).json({
-        success: false,
-        message: 'No puedes eliminar mensajes de otros usuarios'
-      });
-    }
-
-    db.delete('chat_messages', id);
-
-    res.json({
-      success: true,
-      message: 'Mensaje eliminado'
-    });
-  } catch (error) {
-    console.error('Error al eliminar mensaje:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al eliminar el mensaje'
+      message: 'Error interno del servidor'
     });
   }
 });
