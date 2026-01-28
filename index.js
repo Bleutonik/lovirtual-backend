@@ -16,6 +16,7 @@ const incidentsRoutes = require('./routes/incidents');
 const permissionsRoutes = require('./routes/permissions');
 const announcementsRoutes = require('./routes/announcements');
 const chatRoutes = require('./routes/chat');
+const activityRoutes = require('./routes/activity');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -92,6 +93,7 @@ app.use('/api/incidents', incidentsRoutes);
 app.use('/api/permissions', permissionsRoutes);
 app.use('/api/announcements', announcementsRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/activity', activityRoutes);
 
 // Ruta 404 para API
 app.use('/api/*', (req, res) => {

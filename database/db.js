@@ -40,7 +40,8 @@ const initialData = {
     }
   ],
   chat_messages: [],
-  daily_reports: []
+  daily_reports: [],
+  activity_logs: []
 };
 
 // Cargar o crear base de datos
