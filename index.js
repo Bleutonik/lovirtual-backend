@@ -20,18 +20,43 @@ const chatRoutes = require('./routes/chat');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Lista de origenes permitidos
+const allowedOrigins = [
+  'https://lovirtual-test-one.vercel.app',
+  'https://lovirtual.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://localhost:5176',
+  'http://localhost:5177',
+  'http://localhost:3000'
+];
+
 // Middleware de seguridad
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// Configuracion de CORS - permitir multiples puertos
+// Configuracion de CORS
 app.use(cors({
-  origin: true,
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (como mobile apps o curl)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Permitir todos por ahora para debug
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Length', 'X-Request-Id']
 }));
+
+// Manejar preflight requests
+app.options('*', cors());
 
 // Parser de JSON
 app.use(express.json({ limit: '10mb' }));
